@@ -1,14 +1,12 @@
 services:
+  # --- INGESTION: KAFKA & ZOOKEEPER ---
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: zookeeper
     environment:
-      ZOOKEEPER_SERVER_ID: 1
       ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
     networks:
-      - streaming-net
-
+      - football-net
 
   kafka:
     image: confluentinc/cp-kafka:7.4.0
@@ -20,21 +18,15 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     networks:
-      - streaming-net
+      - football-net
 
-  # --------------------
-  # Kafka UI
-  # --------------------
   kafka-ui:
-    image: provectuslabs/kafka-ui:v0.7.2
+    image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
     depends_on:
       - kafka
@@ -44,55 +36,74 @@ services:
       KAFKA_CLUSTERS_0_NAME: football-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
     networks:
-      - streaming-net
+      - football-net
 
-  spark-master:
-    image: apache/spark:3.5.0
-    container_name: spark-master
-    user: root
-    environment:
-      - SPARK_MODE=master
-    ports:
-      - "8080:8080"
-      - "7077:7077"
-    volumes:
-      - ./spark:/opt/spark/work-dir
-    # This command ensures the process stays running
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
-    networks:
-      - streaming-net
-
-  spark-worker:
-    image: apache/spark:3.5.0
-    container_name: spark-worker
-    user: root
-    environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-    depends_on:
-      - spark-master
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
-    networks:
-      - streaming-net
-  # --------------------
-  # PostgreSQL
-  # --------------------
+  # --- STORAGE: POSTGRES ---
   postgres:
-    image: postgres:15.5
+    image: postgres:15
     container_name: postgres
     environment:
       POSTGRES_DB: football
       POSTGRES_USER: football_user
       POSTGRES_PASSWORD: football_pass
     ports:
-      - "5433:5432"  # This maps your computer's 5433 to Docker's 5432
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      - streaming-net
+      - football-net
+
+  # --- PROCESSING: SPARK CLUSTER ---
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark-master
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    networks:
+      - football-net
+
+
+  spark-worker:
+      image: apache/spark:3.5.0
+      container_name: spark-worker
+      depends_on:
+        - spark-master
+      command: >
+        /opt/spark/bin/spark-class
+        org.apache.spark.deploy.worker.Worker
+        spark://spark-master:7077
+      environment:
+        - SPARK_WORKER_MEMORY=1G
+        - SPARK_WORKER_CORES=1
+      networks:
+        - football-net
+
+
+  spark-submit:
+    image: apache/spark:3.5.0
+    container_name: spark-submit
+    user: root  # Added to ensure it can write to /tmp and access volumes
+    depends_on:
+      - spark-master
+    volumes:
+      - ./spark:/opt/spark/work-dir
+    # Increased sleep to 20s to ensure Master is fully initialized
+    entrypoint: >
+        /bin/bash -c "sleep 20 &&
+        /opt/spark/bin/spark-submit
+        --master spark://spark-master:7077
+        --conf 'spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp -Divy.home=/tmp'
+        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.1
+        /opt/spark/work-dir/spark_processor.py"
+    networks:
+      - football-net
 
 networks:
-  streaming-net:
+  football-net:
     driver: bridge
 
 volumes:
